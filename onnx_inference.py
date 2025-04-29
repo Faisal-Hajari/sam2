@@ -1,179 +1,77 @@
 import os
+import math
 import numpy as np
-import cv2
 import onnxruntime as ort
 from PIL import Image
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
+import matplotlib.cm as cm
 
-
-class SAM2OnnxInference:
-    def __init__(self, model_path):
+class ONNXSamInfer:
+    def __init__(self, model_path: str):
         """
-        Initialize the SAM2 ONNX inference class.
-        
+        Initialize the ONNXRuntime session.
         Args:
-            model_path (str): Path to the ONNX model file
+            model_path: Path to the exported ONNX model.
         """
-        self.model_path = model_path
-        
-        # Initialize ONNX Runtime session
-        self.session = ort.InferenceSession(
-            model_path, 
-            providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
-        )
-        
-        # Get model input/output names
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"ONNX model not found: {model_path}")
+        self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
-        
-        # Expected image size for the model
-        self.img_size = 1024
-        
-    def preprocess_image(self, image_path):
-        """
-        Preprocess the input image for model inference.
-        
-        Args:
-            image_path (str): Path to the input image
-            
-        Returns:
-            np.ndarray: Preprocessed image
-            np.ndarray: Original image for visualization
-        """
-        # Read image
-        original_img = cv2.imread(image_path)
-        original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
-        
-        # Resize to 1024x1024
-        img = cv2.resize(original_img, (self.img_size, self.img_size))
-        
-        # Normalize to [0, 1] and convert to RGB
-        img = img.astype(np.float32) / 255.0
-        
-        # Convert to NCHW format (batch, channels, height, width)
-        img = img.transpose(2, 0, 1)[np.newaxis, ...]
-        
-        return img, original_img
-    
-    def run_inference(self, input_img):
-        """
-        Run inference on the preprocessed image.
-        
-        Args:
-            input_img (np.ndarray): Preprocessed image in NCHW format
-            
-        Returns:
-            np.ndarray: Mask predictions
-        """
-        # Run inference
-        outputs = self.session.run(
-            [self.output_name], 
-            {self.input_name: input_img}
-        )
-        
-        # Get the mask predictions (shape: [1, 1, 1024, 1024])
-        masks = outputs[0]
-        print(f"Mask shape: {masks.shape}")
-        return masks
-    
-    def postprocess_masks(self, masks):
-        """
-        Postprocess the mask predictions.
-        
-        Args:
-            masks (np.ndarray): Mask predictions from the model
-            
-        Returns:
-            np.ndarray: Binary masks
-        """
-        # Apply sigmoid to convert logits to probabilities
-        masks = 1 / (1 + np.exp(-masks))
-        
-        # Threshold to get binary masks (adjust threshold as needed)
-        binary_masks = (masks > 0.5).astype(np.uint8)
-        
-        return binary_masks
-    
-    def visualize_and_save(self, original_img, binary_masks, output_path):
-        """
-        Visualize and save the segmentation results.
-        
-        Args:
-            original_img (np.ndarray): Original image
-            binary_masks (np.ndarray): Binary masks
-            output_path (str): Path to save the output image
-        """
-        # Resize original image if needed
-        if original_img.shape[:2] != (self.img_size, self.img_size):
-            original_img = cv2.resize(original_img, (self.img_size, self.img_size))
-        
-        # Create RGB mask overlay
-        mask_overlay = np.zeros_like(original_img)
-        
-        # Extract the first mask (shape: [1024, 1024])
-        mask = binary_masks[0, 0]
-        
-        # Create a colored overlay for the mask (using red color with some transparency)
-        mask_overlay[mask > 0] = [255, 0, 0]  # Red color
-        
-        # Blend original image with mask overlay
-        alpha = 0.5  # Transparency factor
-        blended = cv2.addWeighted(original_img, 1, mask_overlay, alpha, 0)
-        
-        # Save the visualization
-        plt.figure(figsize=(10, 10))
-        plt.imshow(blended)
-        plt.axis('off')
-        plt.tight_layout()
-        plt.savefig(output_path)
-        plt.close()
-        
-        # Also save the raw mask for potential further use
-        mask_path = os.path.splitext(output_path)[0] + "_mask.png"
-        cv2.imwrite(mask_path, mask * 255)
-        
-        print(f"Visualization saved to: {output_path}")
-        print(f"Raw mask saved to: {mask_path}")
-    
-    def process_image(self, image_path, output_path=None):
-        """
-        Process an image and save the visualization with segmentation masks.
-        
-        Args:
-            image_path (str): Path to the input image
-            output_path (str, optional): Path to save the output image. If None, 
-                                         will be derived from input path.
-        """
-        # Set default output path if not specified
-        if output_path is None:
-            base_name = os.path.basename(image_path)
-            name, ext = os.path.splitext(base_name)
-            output_path = os.path.join(os.path.dirname(image_path), f"{name}_segmented{ext}")
-        
-        # Preprocess image
-        input_img, original_img = self.preprocess_image(image_path)
-        
-        # Run inference
-        masks = self.run_inference(input_img)
-        
-        # Postprocess masks
-        binary_masks = self.postprocess_masks(masks)
-        
-        # Visualize and save results
-        self.visualize_and_save(original_img, binary_masks, output_path)
-        
-        return output_path
 
+    def infer(self, image_path: str, output_path: str):
+        """
+        Run inference on the given image and save a grid of overlay images,
+        one per mask, laid out in a square grid.
+        Args:
+            image_path: Path to the input image.
+            output_path: Path to save the output grid image.
+        """
+        # 1) Load and preprocess image
+        image = Image.open(image_path).convert("RGB")
+        image = image.resize((1024, 1024), resample=Image.BILINEAR)
+        img_np = np.array(image).astype(np.float32) / 255.0  # [H,W,3]
+        img_input = img_np.transpose(2, 0, 1)[None, ...]     # [1,3,1024,1024]
 
-# Example usage
-if __name__ == "__main__":
-    # Initialize the inference class
-    model_path = "sam2_onnx.onnx"  # Path to your exported ONNX model
-    inference = SAM2OnnxInference(model_path)
-    
-    # Process an image
-    image_path = "original_image.png"  # Path to your input image
-    output_path = inference.process_image(image_path)
-    
-    print(f"Processing complete. Output saved to: {output_path}")
+        # 2) ONNX inference
+        ort_inputs = {self.input_name: img_input}
+        masks_out = self.session.run([self.output_name], ort_inputs)[0]
+        # masks_out: [1, N, 1024, 1024]
+        masks = masks_out[0]  # [N, H, W]
+
+        # 3) Threshold logits to binary masks
+        bin_masks = masks > 0.2
+        num_masks = bin_masks.shape[0]
+        num_masks = 10
+        print(f"Number of masks: {masks.shape}")
+
+        # 4) Create overlay images for each mask
+        overlay_imgs = []
+        colormap = cm.get_cmap('jet', num_masks)
+        for i in range(num_masks):
+            overlay = img_np.copy()
+            mask = bin_masks[i]
+            color = np.array(colormap(i)[:3])
+            overlay[mask] = overlay[mask] * 0.5 + color * 0.5
+            overlay_img = (overlay * 255).astype(np.uint8)
+            overlay_imgs.append(Image.fromarray(overlay_img))
+
+        # 5) Compute grid size (square-ish)
+        grid_cols = int(math.ceil(math.sqrt(num_masks)))
+        grid_rows = int(math.ceil(num_masks / grid_cols))
+        cell_w, cell_h = 1024, 1024
+        grid_w = grid_cols * cell_w
+        grid_h = grid_rows * cell_h
+        grid_img = Image.new('RGB', (grid_w, grid_h))
+
+        # 6) Paste each overlay into the grid
+        for idx, img in enumerate(overlay_imgs[:]):
+            row = idx // grid_cols
+            col = idx % grid_cols
+            grid_img.paste(img, (col * cell_w, row * cell_h))
+
+        # 7) Save the final grid image
+        grid_img.save(output_path)
+
+# Example usage:
+infer = ONNXSamInfer('sam2_onnx.onnx')
+infer.infer('original_image.png', 'output_grid.png')
