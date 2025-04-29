@@ -131,11 +131,13 @@ class ImageDecoder(nn.Module):
         return obj_ptr, mask_for_mem, pred_mask
 
 
-class CombinedSAM2(nnModule): 
-    def __inti__(self, sam_model: SAM2Base) -> None:
+class CombinedSAM2(nn.Module): 
+    def __init__(self, sam_model: SAM2Base) -> None:
         super().__init__()
         self.image_encoder = ImageEncoder(sam_model)
         self.image_decoder = ImageDecoder(sam_model)
+        self.point_coords = torch.randn(20, 2, 2).cpu()
+        self.point_labels = torch.randn(20, 2).cpu()
 
     def forward(self, image):
         """
@@ -151,8 +153,17 @@ class CombinedSAM2(nnModule):
             current_vision_feat2,
             current_vision_pos_embeds[-1],
         )"""
-        self.image_encoder(image)
-        
+        image_embed, high_res_feats_0, high_res_feats_1, _, _ = self.image_encoder(image)
+        point_coords = self.point_coords
+        point_labels = self.point_labels
+        _, _, masks = self.image_decoder(
+            point_coords=point_coords,
+            point_labels=point_labels,
+            image_embed=image_embed,
+            high_res_feats_0=high_res_feats_0,
+            high_res_feats_1=high_res_feats_1,
+        )
+        return masks
         
 
  
@@ -186,54 +197,7 @@ def export_image_encoder(model, onnx_path):
     onnx.checker.check_model(onnx_model)
     print("image_encoder.onnx model is valid!")
  
- 
-def export_memory_attention(model, onnx_path):
-    current_vision_feat = torch.randn(1, 256, 64, 64)  # [1, 256, 64, 64],当前帧的视觉特征
-    current_vision_pos_embed = torch.randn(4096, 1, 256)  # [4096, 1, 256],当前帧的位置特征
-    memory_0 = torch.randn(16, 256)
-    memory_1 = torch.randn(7, 64, 64, 64)
-    memory_pos_embed = torch.randn(7 * 4096 + 64, 1, 64)  # [y*4096,1,64], 最近y帧的位置编码特性
-    out = model(
-        current_vision_feat=current_vision_feat,
-        current_vision_pos_embed=current_vision_pos_embed,
-        memory_0=memory_0,
-        memory_1=memory_1,
-        memory_pos_embed=memory_pos_embed,
-    )
-    input_name = [
-        "current_vision_feat",
-        "current_vision_pos_embed",
-        "memory_0",
-        "memory_1",
-        "memory_pos_embed",
-    ]
-    dynamic_axes = {
-        "num_obj_ptr": {0: "num"},
-        "memory_0": {0: "num"},
-        "memory_1": {0: "buff_size"},
-        "memory_pos_embed": {0: "buff_size_embed"},
-    }
-    torch.onnx.export(
-        model,
-        (current_vision_feat, current_vision_pos_embed, memory_0, memory_1, memory_pos_embed),
-        onnx_path + "memory_attention.onnx",
-        export_params=True,
-        opset_version=17,
-        do_constant_folding=True,
-        input_names=input_name,
-        output_names=["image_embed"],
-        dynamic_axes=dynamic_axes,
-    )
-    # 简化模型,
-    # original_model = onnx.load(onnx_path + "memory_attention.onnx")
-    # simplified_model, check = simplify(original_model)
-    # onnx.save(simplified_model, onnx_path + "memory_attention.onnx")
-    # 检查检查.onnx格式是否正确
-    onnx_model = onnx.load(onnx_path + "memory_attention.onnx")
-    onnx.checker.check_model(onnx_model)
-    print("memory_attention.onnx model is valid!")
- 
- 
+
 def export_image_decoder(model, onnx_path):
     point_coords = torch.randn(20, 2, 2).cpu()
     point_labels = torch.randn(20, 2).cpu()
@@ -243,7 +207,9 @@ def export_image_decoder(model, onnx_path):
     image_embed = torch.randn(1, 256, 64, 64).cpu()
     high_res_feats_0 = torch.randn(1, 32, 256, 256).cpu()
     high_res_feats_1 = torch.randn(1, 64, 128, 128).cpu()
- 
+    # pix_feat              [1, 256, 64, 64]
+        # high_res_features_0   [1, 32, 256, 256]
+        # high_res_features_1   [1, 64, 128, 128]
     out = model(
         point_coords=point_coords,
         point_labels=point_labels,
@@ -289,35 +255,26 @@ def export_image_decoder(model, onnx_path):
     onnx.checker.check_model(onnx_model)
     print("mask_decoder.onnx model is valid!")
  
- 
-def export_memory_encoder(model, onnx_path):
-    mask_for_mem = torch.randn(1, 1, 1024, 1024)
-    pix_feat = torch.randn(1, 256, 64, 64)
- 
-    out = model(mask_for_mem=mask_for_mem, pix_feat=pix_feat)
- 
-    input_names = ["mask_for_mem", "pix_feat"]
-    output_names = ["maskmem_features", "maskmem_pos_enc", "temporal_code"]
+
+def export_combined(mode, onnx_path):
+    input_img = torch.randn(1, 3, 1024, 1024).cpu()
+    out = mode(input_img)
+    output_names = ["masks"]
     torch.onnx.export(
-        model,
-        (mask_for_mem, pix_feat),
-        onnx_path + "memory_encoder.onnx",
+        mode,
+        input_img,
+        onnx_path + "combined_model.onnx",
         export_params=True,
         opset_version=17,
         do_constant_folding=True,
-        input_names=input_names,
+        input_names=["image"],
         output_names=output_names,
     )
-    # 简化模型,
-    # original_model = onnx.load(onnx_path+"memory_encoder.onnx")
-    # simplified_model, check = simplify(original_model)
-    # onnx.save(simplified_model, onnx_path+"memory_encoder.onnx")
     # 检查检查.onnx格式是否正确
-    onnx_model = onnx.load(onnx_path + "memory_encoder.onnx")
+    onnx_model = onnx.load(onnx_path + "combined_model.onnx")
     onnx.checker.check_model(onnx_model)
-    print("memory_encoder.onnx model is valid!")
- 
- 
+    print("combined_model.onnx model is valid!")
+    
 # ****************************************************************************
  
 if __name__ == "__main__":
@@ -342,7 +299,10 @@ if __name__ == "__main__":
  
     image_decoder = ImageDecoder(sam2_model).cpu()
     export_image_decoder(image_decoder, model_dir)
- 
+    
+    combined_model = CombinedSAM2(sam2_model).cpu()
+    export_combined(combined_model, model_dir)
+    
 # def main():
 #     model_type = ["tiny", "small", "large", "base+"][3]
 #     onnx_output_path = "checkpoints/{}/".format(model_type)
